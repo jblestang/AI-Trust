@@ -346,3 +346,4 @@ Le cœur de la bibliothèque comporte **46 spécifications, lemmes et théorème
 | **ENF-02**| Group Commit haute cadence | [`append_batch`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L1240) | `theorem_batch_commit_prefix_soundness`, `test_journal_group_commit_batch` |
 | **ENF-03**| Zéro panique & Sûreté mémoire | Directives `#![forbid(unsafe_code)]` | Vérification Clippy `-D warnings`, 98.32% couverture |
 | **ENF-04**| Preuve SMT intégrale | Bloc `verus!` | 46 vérifications réussies sous Z3 |
+
