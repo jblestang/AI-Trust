@@ -1180,6 +1180,81 @@ pub proof fn lemma_monotonic_prefix(
 }
 
 // ----------------------------------------------------------------------------
+// FERMETURE DU TROU N°2 : SPÉCIFICATION FORMELLE DU SCAN DE RECOVERY
+// ----------------------------------------------------------------------------
+
+/// Prédicat d'intégrité séquentielle continue (chaîne saine ininterrompue) jusqu'à k.
+///
+/// Modélise rigoureusement la condition d'arrêt et d'intégrité de la boucle de scan du journal :
+/// - Tous les enregistrements d'indice 0 à k-1 sont strictement valides (is_valid_record).
+/// - Les couples (epoch, seq) forment une suite strictement croissante sur toute la plage.
+pub open spec fn is_continuous_healthy_chain(records: Seq<DiskRecord>, k: int) -> bool {
+    0 <= k <= records.len() &&
+    (forall|i: int| #![auto] 0 <= i < k ==> is_valid_record(records[i])) &&
+    (forall|i: int, j: int| #![auto] 0 <= i < j < k ==>
+        (records[i].epoch < records[j].epoch ||
+         (records[i].epoch == records[j].epoch && records[i].seq < records[j].seq)))
+}
+
+/// Théorème de Clôture Formelle de l'Algorithme de Recovery (Fermeture du Trou n°2) :
+///
+/// Démontre par déduction formelle que tout algorithme extrayant un préfixe continu sain
+/// de longueur k garantit les trois propriétés fondamentales de correction :
+/// 1. Le résultat extrait est un sous-ensemble préfixe valide au sens de `is_valid_prefix`.
+/// 2. Chaque enregistrement restauré est garanti 100% intègre (`is_valid_record`).
+/// 3. La séquence restaurée est globalement et strictement monotone (`is_strictly_monotonic`).
+pub proof fn theorem_recovery_algorithm_soundness(
+    committed: Seq<DiskRecord>,
+    k: int,
+)
+    requires
+        0 <= k <= committed.len(),
+        is_continuous_healthy_chain(committed, k),
+    ensures
+        is_valid_prefix(committed.subrange(0, k), committed),
+        is_strictly_monotonic(committed.subrange(0, k)),
+        forall|i: int| #![auto] 0 <= i < k ==> is_valid_record(committed.subrange(0, k)[i]),
+{
+}
+
+/// Théorème d'Arrêt Immédiat à la Première Corruption Physique :
+///
+/// Propriété de Confinement Préfixe :
+/// Démontre par induction SMT que si une corruption de bloc survient à l'indice cut (checksum erroné ou magic corrompu),
+/// aucune chaîne saine continue ne peut s'étendre au-delà de cut.
+/// L'algorithme de recovery s'arrête obligatoirement avant d'ingérer le moindre octet altéré.
+pub proof fn theorem_recovery_stops_at_first_corruption(
+    records: Seq<DiskRecord>,
+    cut: int,
+)
+    requires
+        0 <= cut < records.len(),
+        !is_valid_record(records[cut]),
+    ensures
+        forall|len: int| cut < len <= records.len() ==> !is_continuous_healthy_chain(records, len),
+{
+}
+
+/// Théorème d'Arrêt Immédiat à la Première Rupture de Monotonie :
+///
+/// Propriété d'Ordonnancement Strict :
+/// Démontre que si une anomalie d'ordre survient à l'indice cut (séquence décroissante ou égale),
+/// l'algorithme ne peut admettre aucun bloc ultérieur dans la chaîne restaurée.
+/// Les tentatives de réinjection ou rejeux hors-séquence sont bloquées dès l'anomalie.
+pub proof fn theorem_recovery_stops_at_first_non_monotonic(
+    records: Seq<DiskRecord>,
+    cut: int,
+)
+    requires
+        0 <= cut < records.len() - 1,
+        !(records[cut].epoch < records[cut + 1].epoch ||
+          (records[cut].epoch == records[cut + 1].epoch && records[cut].seq < records[cut + 1].seq)),
+    ensures
+        forall|len: int| cut + 1 < len <= records.len() ==> !is_continuous_healthy_chain(records, len),
+{
+}
+
+// ----------------------------------------------------------------------------
 // COMPTEUR MATÉRIEL HORS-DISQUE (TPM 2.0 / NVRAM CARTE MÈRE)
 // ----------------------------------------------------------------------------
 
@@ -1207,6 +1282,37 @@ pub proof fn theorem_disk_replacement_monotonicity(
     ensures
         hardware_nvram_epoch != old_disk_epoch,
         hardware_nvram_epoch > old_disk_epoch,
+{
+}
+
+/// Théorème Fondamental d'Allocation par Plages et de Survie au Remplacement de Disque :
+///
+/// Propriété Formelle Anti-Usure NVRAM et Continuité Matérielle :
+/// Démontre par arithmétique formelle que toute réservation d'une plage d'époques de taille K > 0
+/// garantit que n'importe quelle réservation ultérieure (débutant à `new_base >= old_base + range_size`)
+/// sera STRICTEMENT SUPÉRIEURE à n'importe quelle époque `used_epoch` allouée ou utilisée
+/// dans la plage précédente.
+///
+/// Conséquence Vitale pour la Sûreté :
+/// Même si le disque dur de la Machine A est détruit, effacé ou remplacé physiquement
+/// après avoir utilisé une partie de la plage, le redémarrage sur le nouveau disque
+/// allouera une base strictement supérieure, éliminant tout risque de collision d'époque
+/// ou de rejeu inter-sessions.
+pub proof fn theorem_epoch_range_disk_replacement_monotonicity(
+    old_base: u64,
+    range_size: u64,
+    new_base: u64,
+    used_epoch: u64,
+)
+    requires
+        range_size > 0,
+        old_base + range_size < HALF_SPACE,
+        new_base >= old_base + range_size,
+        used_epoch >= old_base,
+        used_epoch < old_base + range_size,
+    ensures
+        new_base > used_epoch,
+        new_base != used_epoch,
 {
 }
 
@@ -1444,13 +1550,24 @@ impl HardwareMonotonicCounter {
     /// Incrémente atomiquement le registre matériel NVRAM/TPM et persiste la nouvelle valeur.
     ///
     /// Garantit la monotonicité stricte de l'époque même après remplacement intégral du disque dur :
-    /// 1. Lit la valeur matérielle persistée.
-    /// 2. Incrémente modulo 2^64.
-    /// 3. Écrit et scelle sur le composant physique non-volatile via barrière matérielle `sync_data`.
-    /// 4. Retourne la nouvelle époque garantie unique.
+    /// - Lit la valeur matérielle persistée.
+    /// - Incrémente modulo 2^64.
+    /// - Écrit et scelle sur le composant physique non-volatile via barrière matérielle `sync_data`.
+    /// - Retourne la nouvelle époque garantie unique.
     pub fn fetch_and_increment(&self) -> std::io::Result<u64> {
+        self.fetch_and_add(1)
+    }
+
+    /// Incrémente atomiquement le registre matériel NVRAM/TPM d'un pas donné `step` et persiste la nouvelle valeur.
+    ///
+    /// Opération arithmétique atomique scellée avec barrière de persistance :
+    /// - Lit la valeur actuelle persistée sur le composant matériel.
+    /// - Effectue l'addition modulaire RFC 1982 `current.wrapping_add(step)`.
+    /// - Réécrit et force la synchronisation physique via `sync_data()`.
+    /// - Retourne la nouvelle borne haute atteinte.
+    pub fn fetch_and_add(&self, step: u64) -> std::io::Result<u64> {
         let current = self.read()?;
-        let next = current.wrapping_add(1);
+        let next = current.wrapping_add(step);
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -1459,5 +1576,260 @@ impl HardwareMonotonicCounter {
         file.write_all(&next.to_be_bytes())?;
         file.sync_data()?;
         Ok(next)
+    }
+
+    /// Réserve atomiquement une plage d'époques de taille `range_size` pour amortir l'usure de la NVRAM/TPM.
+    ///
+    /// RÉSILIENCE AU REMPLACEMENT DE DISQUE :
+    /// En incrémentant immédiatement le registre matériel hors-disque de `range_size`, tout montage
+    /// d'un nouveau support de masse ou redémarrage physique débutera obligatoirement à une époque
+    /// strictement supérieure à l'intégralité de la plage précédente, éliminant tout risque de
+    /// collision d'époque ou de rejeu inter-sessions même si l'ancien disque a été détruit.
+    pub fn reserve_epoch_range(&self, range_size: u64) -> std::io::Result<EpochRange> {
+        let step = if range_size == 0 { 1 } else { range_size };
+        let current = self.read()?;
+        let next = current.wrapping_add(step);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
+        file.write_all(&next.to_be_bytes())?;
+        file.sync_data()?;
+        Ok(EpochRange {
+            start_epoch: current.wrapping_add(1),
+            end_epoch: next.wrapping_add(1),
+        })
+    }
+}
+
+/// Plage d'époques réservée atomiquement depuis la NVRAM / TPM pour atténuer l'usure matérielle.
+///
+/// Modélise l'intervalle semi-ouvert d'époques valides `[start_epoch, end_epoch)` :
+/// - `start_epoch` : première époque allouée pour la session courante.
+/// - `end_epoch` : limite exclusive au-delà de laquelle une nouvelle allocation matérielle est requise.
+/// - Protège le matériel physique contre l'épuisement des cycles d'écriture en cas de crashs fréquents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochRange {
+    /// Première époque utilisable de la plage allouée (inclusive).
+    pub start_epoch: u64,
+    /// Borne supérieure de la plage allouée (exclusive).
+    pub end_epoch: u64,
+}
+
+impl EpochRange {
+    /// Vérifie si une époque donnée appartient à cette plage allouée.
+    ///
+    /// Retourne `true` si `epoch >= start_epoch` et `epoch < end_epoch`.
+    pub fn contains(&self, epoch: u64) -> bool {
+        epoch >= self.start_epoch && epoch < self.end_epoch
+    }
+
+    /// Calcule le nombre total d'époques contenues dans la plage.
+    ///
+    /// Opération arithmétique déterministe `end_epoch.saturating_sub(start_epoch)`.
+    pub fn count(&self) -> u64 {
+        self.end_epoch.saturating_sub(self.start_epoch)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// MODULE DE TÉLÉMÉTRIE & MÉTRIQUES D'AUDIT EN TEMPS RÉEL (ZÉRO-ALLOCATION)
+// ----------------------------------------------------------------------------
+
+/// Module de télémétrie déterministe pour l'observabilité temps réel de l'automate AI-Trust.
+///
+/// Conçu pour les systèmes embarqués et les boucles de traitement haute fréquence :
+/// - Ne réalise aucune allocation dynamique sur le chemin critique (scalaires entiers purs).
+/// - Enregistre de manière exhaustive les résultats d'admission, de corrélation et d'éviction.
+/// - Fournit des exportateurs synthétiques et conformes au standard OpenMetrics / Prometheus.
+/// - Garantit l'absence d'effets de bord sur les garanties de vivacité et de sûreté du validateur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamTelemetry {
+    /// Nombre total de paquets de données (Data PDUs) reçus.
+    pub pdu_received: u64,
+    /// Nombre total de descripteurs de confiance (Trust Descriptors) reçus.
+    pub trust_received: u64,
+    /// Nombre de paquets validés avec succès (corrélation positive d'intégrité).
+    pub validated_packets: u64,
+    /// Nombre d'altérations détectées (empreintes divergentes / tampering).
+    pub tampered_packets: u64,
+    /// Nombre de paquets dupliqués ou obsolètes rejetés (protection anti-rejeu).
+    pub replayed_packets: u64,
+    /// Nombre de paquets déclarés perdus ou supprimés (dropped PDUs lors de l'éviction).
+    pub dropped_packets: u64,
+    /// Nombre de paquets déclarés intrus ou ajoutés (added PDUs sans certification lors de l'éviction).
+    pub injected_packets: u64,
+    /// Nombre de transitions d'époque authentifiées (redémarrages légitimes de l'émetteur).
+    pub epoch_transitions: u64,
+    /// Nombre de synchronisations initiales au démarrage à froid (Cold-Start).
+    pub cold_start_syncs: u64,
+    /// Nombre de paquets rejetés pour séquence hors de la fenêtre active.
+    pub out_of_window_packets: u64,
+}
+
+impl StreamTelemetry {
+    /// Initialise une nouvelle structure de télémétrie avec des compteurs vierges.
+    ///
+    /// Constructeur `const` déterministe garantissant une allocation statique ou sur la pile :
+    /// - Aucun appel à l'allocateur global du tas (heap allocator).
+    /// - Tous les compteurs d'audit (PDU, Trust, validations, altérations, rejeux, pertes) à 0.
+    /// - Prêt pour l'insertion directe dans une structure de supervision ou un réacteur I/O.
+    pub const fn new() -> Self {
+        Self {
+            pdu_received: 0,
+            trust_received: 0,
+            validated_packets: 0,
+            tampered_packets: 0,
+            replayed_packets: 0,
+            dropped_packets: 0,
+            injected_packets: 0,
+            epoch_transitions: 0,
+            cold_start_syncs: 0,
+            out_of_window_packets: 0,
+        }
+    }
+
+    /// Enregistre le résultat de l'admission d'une PDU de données.
+    ///
+    /// Incrémente les compteurs scalaires selon la classification issue du validateur :
+    /// - `BufferedWaitingForTrust` : paquet mis en attente sans corrélation immédiate.
+    /// - `CorrelatedValid` : paquet immédiatement certifié intègre par son descripteur.
+    /// - `CorrelatedTampered` : falsification détectée (empreinte divergente).
+    /// - `Duplicated` / `StaleEpoch` : tentative de rejeu passée ou inter-sessions interceptée.
+    /// - `OutOfWindow` : séquence rejetée car située en dehors de la fenêtre temporelle.
+    pub fn record_pdu_outcome(&mut self, outcome: &ImmediatePduResult) {
+        self.pdu_received = self.pdu_received.wrapping_add(1);
+        match outcome {
+            ImmediatePduResult::BufferedWaitingForTrust => {},
+            ImmediatePduResult::CorrelatedValid => {
+                self.validated_packets = self.validated_packets.wrapping_add(1);
+            },
+            ImmediatePduResult::CorrelatedTampered => {
+                self.tampered_packets = self.tampered_packets.wrapping_add(1);
+            },
+            ImmediatePduResult::Duplicated | ImmediatePduResult::StaleEpoch => {
+                self.replayed_packets = self.replayed_packets.wrapping_add(1);
+            },
+            ImmediatePduResult::OutOfWindow => {
+                self.out_of_window_packets = self.out_of_window_packets.wrapping_add(1);
+            },
+        }
+    }
+
+    /// Enregistre le résultat du traitement d'un descripteur de confiance.
+    ///
+    /// Met à jour les compteurs associés au flux de contrôle sécurisé :
+    /// - `CorrelatedValid` : certification positive d'une PDU déjà en attente.
+    /// - `CorrelatedTampered` : altération détectée lors de l'arrivée du descripteur.
+    /// - `NewEpochInitialized` : comptabilisation d'un redémarrage légitime de l'émetteur.
+    /// - `ColdStartSynchronized` : auto-acquisition initiale de l'automate récepteur.
+    /// - `StaleEpoch` : descripteur obsolète issu d'une session antérieure rejeté.
+    pub fn record_trust_outcome(&mut self, outcome: &ImmediateTrustResult) {
+        self.trust_received = self.trust_received.wrapping_add(1);
+        match outcome {
+            ImmediateTrustResult::BufferedWaitingForPdu | ImmediateTrustResult::RedundantTrust => {},
+            ImmediateTrustResult::CorrelatedValid => {
+                self.validated_packets = self.validated_packets.wrapping_add(1);
+            },
+            ImmediateTrustResult::CorrelatedTampered => {
+                self.tampered_packets = self.tampered_packets.wrapping_add(1);
+            },
+            ImmediateTrustResult::OutOfWindow => {
+                self.out_of_window_packets = self.out_of_window_packets.wrapping_add(1);
+            },
+            ImmediateTrustResult::StaleEpoch => {
+                self.replayed_packets = self.replayed_packets.wrapping_add(1);
+            },
+            ImmediateTrustResult::NewEpochInitialized => {
+                self.epoch_transitions = self.epoch_transitions.wrapping_add(1);
+            },
+            ImmediateTrustResult::ColdStartSynchronized => {
+                self.cold_start_syncs = self.cold_start_syncs.wrapping_add(1);
+            },
+        }
+    }
+
+    /// Enregistre le rapport d'éviction généré lors de l'avancement d'un slot.
+    ///
+    /// Analyse la classification finale du créneau expulsé en O(1) :
+    /// - `DroppedPdu` : perte réseau ou déni de service (descripteur sans données associées).
+    /// - `AddedPdu` : injection illégitime de données (PDU non certifiée par l'émetteur).
+    /// - `NormalValidated` / `TamperedResidual` : créneaux déjà traités lors de la corrélation.
+    pub fn record_eviction(&mut self, report: &EvictionReport) {
+        match report {
+            EvictionReport::None | EvictionReport::NormalValidated { .. } | EvictionReport::TamperedResidual { .. } => {},
+            EvictionReport::DroppedPdu { .. } => {
+                self.dropped_packets = self.dropped_packets.wrapping_add(1);
+            },
+            EvictionReport::AddedPdu { .. } => {
+                self.injected_packets = self.injected_packets.wrapping_add(1);
+            },
+        }
+    }
+
+    /// Rendu texte compact déterministe pour le logging et la supervision opérationnelle.
+    ///
+    /// Produit une ligne de synthèse formatée synthétisant l'état global du flux :
+    /// volume reçu, paquets certifiés, altérations détectées et anomalies réseau.
+    pub fn summary(&self) -> String {
+        format!(
+            "PDU: {} | Trust: {} | Valid: {} | Tampered: {} | Replay: {} | Drop: {} | Inject: {} | EpochTrans: {} | ColdStart: {}",
+            self.pdu_received,
+            self.trust_received,
+            self.validated_packets,
+            self.tampered_packets,
+            self.replayed_packets,
+            self.dropped_packets,
+            self.injected_packets,
+            self.epoch_transitions,
+            self.cold_start_syncs,
+        )
+    }
+
+    /// Exporte les compteurs de télémétrie au format standard OpenMetrics / Prometheus.
+    ///
+    /// Génère un bloc de métriques textuelles conformes à la norme OpenMetrics :
+    /// chaque métrique comprend son aide (# HELP) et sa déclaration de type (# TYPE counter).
+    /// Intégrable directement dans un collecteur Prometheus ou un agent de monitoring.
+    pub fn prometheus_export(&self) -> String {
+        format!(
+            "# HELP ai_trust_pdu_total Total Data PDUs processed\n\
+             # TYPE ai_trust_pdu_total counter\n\
+             ai_trust_pdu_total {}\n\
+             # HELP ai_trust_trust_total Total Trust Descriptors processed\n\
+             # TYPE ai_trust_trust_total counter\n\
+             ai_trust_trust_total {}\n\
+             # HELP ai_trust_validated_total Total successfully validated packets\n\
+             # TYPE ai_trust_validated_total counter\n\
+             ai_trust_validated_total {}\n\
+             # HELP ai_trust_tampered_total Total tampered packets detected\n\
+             # TYPE ai_trust_tampered_total counter\n\
+             ai_trust_tampered_total {}\n\
+             # HELP ai_trust_replayed_total Total replayed packets rejected\n\
+             # TYPE ai_trust_replayed_total counter\n\
+             ai_trust_replayed_total {}\n\
+             # HELP ai_trust_dropped_total Total dropped packets detected\n\
+             # TYPE ai_trust_dropped_total counter\n\
+             ai_trust_dropped_total {}\n\
+             # HELP ai_trust_injected_total Total spurious injected packets detected\n\
+             # TYPE ai_trust_injected_total counter\n\
+             ai_trust_injected_total {}\n\
+             # HELP ai_trust_epoch_transitions_total Total authenticated epoch transitions\n\
+             # TYPE ai_trust_epoch_transitions_total counter\n\
+             ai_trust_epoch_transitions_total {}\n\
+             # HELP ai_trust_cold_start_total Total cold-start auto-acquisitions\n\
+             # TYPE ai_trust_cold_start_total counter\n\
+             ai_trust_cold_start_total {}\n",
+            self.pdu_received,
+            self.trust_received,
+            self.validated_packets,
+            self.tampered_packets,
+            self.replayed_packets,
+            self.dropped_packets,
+            self.injected_packets,
+            self.epoch_transitions,
+            self.cold_start_syncs,
+        )
     }
 }

@@ -531,3 +531,66 @@ fn test_pending_next_burst_overflow() {
     assert_eq!(val.receive_pdu(&pdu_overflow), ImmediatePduResult::OutOfWindow);
 }
 
+#[test]
+fn test_stream_telemetry_metrics_and_prometheus() {
+    let mut telemetry = ai_trust::StreamTelemetry::new();
+
+    // 1. Enregistrement d'événements PDU et Trust nominaux
+    let res_pdu1 = ImmediatePduResult::BufferedWaitingForTrust;
+    let res_trust1 = ImmediateTrustResult::CorrelatedValid;
+    telemetry.record_pdu_outcome(&res_pdu1);
+    telemetry.record_trust_outcome(&res_trust1);
+    assert_eq!(telemetry.pdu_received, 1);
+    assert_eq!(telemetry.trust_received, 1);
+    assert_eq!(telemetry.validated_packets, 1);
+
+    // 2. Altération (Tampering)
+    telemetry.record_pdu_outcome(&ImmediatePduResult::CorrelatedTampered);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::CorrelatedTampered);
+    assert_eq!(telemetry.tampered_packets, 2);
+
+    // 3. Rejeux et Époque Obsolète
+    telemetry.record_pdu_outcome(&ImmediatePduResult::Duplicated);
+    telemetry.record_pdu_outcome(&ImmediatePduResult::StaleEpoch);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::StaleEpoch);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::RedundantTrust);
+    assert_eq!(telemetry.replayed_packets, 3);
+
+    // 4. Hors fenêtre (OutOfWindow) et Attente Trust
+    telemetry.record_pdu_outcome(&ImmediatePduResult::OutOfWindow);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::OutOfWindow);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::BufferedWaitingForPdu);
+    assert_eq!(telemetry.out_of_window_packets, 2);
+
+    // 5. Éviction : PDU Perdue (Dropped), PDU Intruse (Added), Validated, TamperedResidual, None
+    telemetry.record_eviction(&EvictionReport::DroppedPdu { seq: 42 });
+    telemetry.record_eviction(&EvictionReport::AddedPdu { seq: 43 });
+    telemetry.record_eviction(&EvictionReport::NormalValidated { seq: 44 });
+    telemetry.record_eviction(&EvictionReport::TamperedResidual { seq: 45 });
+    telemetry.record_eviction(&EvictionReport::None);
+    assert_eq!(telemetry.dropped_packets, 1);
+    assert_eq!(telemetry.injected_packets, 1);
+
+    // 6. Transition d'époque et Cold-Start
+    telemetry.record_trust_outcome(&ImmediateTrustResult::NewEpochInitialized);
+    telemetry.record_trust_outcome(&ImmediateTrustResult::ColdStartSynchronized);
+    assert_eq!(telemetry.epoch_transitions, 1);
+    assert_eq!(telemetry.cold_start_syncs, 1);
+
+    // 6. Vérification du format de sortie (summary & prometheus)
+    let summary = telemetry.summary();
+    assert!(summary.contains("Valid: 1"));
+    assert!(summary.contains("Tampered: 2"));
+    assert!(summary.contains("Replay: 3"));
+    assert!(summary.contains("Drop: 1"));
+    assert!(summary.contains("Inject: 1"));
+
+    let prom = telemetry.prometheus_export();
+    assert!(prom.contains("ai_trust_validated_total 1"));
+    assert!(prom.contains("ai_trust_tampered_total 2"));
+    assert!(prom.contains("ai_trust_replayed_total 3"));
+    assert!(prom.contains("ai_trust_dropped_total 1"));
+    assert!(prom.contains("ai_trust_injected_total 1"));
+}
+
+

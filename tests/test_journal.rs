@@ -293,4 +293,63 @@ fn test_journal_binary_serialization_roundtrip_and_layout() {
     assert_eq!(rec.checksum, expected_checksum);
 }
 
+#[test]
+fn test_epoch_range_allocation_and_disk_replacement_immunity() {
+    let nvram_path = temp_journal_path("tpm_ranges");
+    let disk1_path = temp_journal_path("disk1_range");
+    let disk2_path = temp_journal_path("disk2_range");
+
+    let counter = ai_trust::HardwareMonotonicCounter::new(&nvram_path);
+
+    // 1. Première réservation matérielle : plage de 1 000 époques
+    let range1 = counter.reserve_epoch_range(1000).unwrap_or(ai_trust::EpochRange { start_epoch: 0, end_epoch: 0 });
+    assert_eq!(range1.start_epoch, 1);
+    assert_eq!(range1.end_epoch, 1001);
+    assert_eq!(range1.count(), 1000);
+    assert!(range1.contains(1));
+    assert!(range1.contains(1000));
+    assert!(!range1.contains(1001));
+
+    // Simulation : Disque 1 utilise l'époque 1 et 2
+    let journal1 = TrustJournal::new(&disk1_path);
+    assert!(journal1.append(&TrustDescriptor { epoch: 1, seq: 0, expected_digest: compute_digest(10) }).is_ok());
+    assert!(journal1.append(&TrustDescriptor { epoch: 2, seq: 0, expected_digest: compute_digest(20) }).is_ok());
+
+    let mut receiver = ai_trust::SlidingWindowValidator::new(1, 0);
+    assert_eq!(
+        receiver.receive_trust(&TrustDescriptor { epoch: 1, seq: 0, expected_digest: compute_digest(10) }),
+        ai_trust::ImmediateTrustResult::BufferedWaitingForPdu
+    );
+    assert_eq!(
+        receiver.receive_trust(&TrustDescriptor { epoch: 2, seq: 0, expected_digest: compute_digest(20) }),
+        ai_trust::ImmediateTrustResult::NewEpochInitialized
+    );
+
+    // 2. CRASH TOTAL ET REMPLACEMENT DU DISQUE DUR (Disque 1 détruit)
+    let _ = std::fs::remove_file(&disk1_path);
+
+    // 3. Nouveau Disque 2 installé : Machine A redémarre et réserve sa plage suivante
+    let range2 = counter.reserve_epoch_range(1000).unwrap_or(ai_trust::EpochRange { start_epoch: 0, end_epoch: 0 });
+    assert_eq!(range2.start_epoch, 1001);
+    assert_eq!(range2.end_epoch, 2001);
+
+    // RÉSILIENCE FORMELLE : range2.start_epoch (1001) est STRICTEMENT SUPÉRIEUR à toutes les époques du Disque 1 (1 et 2)
+    assert!(range2.start_epoch > 2);
+    assert!(range2.start_epoch > range1.end_epoch - 1);
+
+    // Machine A émet avec le Disque 2 à partir de epoch 1001
+    let journal2 = TrustJournal::new(&disk2_path);
+    assert!(journal2.append(&TrustDescriptor { epoch: 1001, seq: 0, expected_digest: compute_digest(100) }).is_ok());
+
+    // Machine B valide la transition sans aucun conflit d'époque
+    let res = receiver.receive_trust(&TrustDescriptor { epoch: 1001, seq: 0, expected_digest: compute_digest(100) });
+    assert_eq!(res, ai_trust::ImmediateTrustResult::NewEpochInitialized);
+    assert_eq!(receiver.current_epoch, 1001);
+
+    // Nettoyage
+    let _ = std::fs::remove_file(&nvram_path);
+    let _ = std::fs::remove_file(&disk2_path);
+}
+
+
 

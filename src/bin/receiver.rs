@@ -55,6 +55,7 @@ fn main() -> std::io::Result<()> {
     println!("[RÉSEAU] Écoute Flux Confiance : {}", TRUST_BIND_ADDR);
 
     let mut validator = SlidingWindowValidator::new_cold_start();
+    let mut telemetry = ai_trust::StreamTelemetry::new();
     println!(
         "[ÉTAT] Fenêtre glissante active en mode COLD-START (en attente d'auto-acquisition, capacité: {} slots)\n",
         WINDOW_CAPACITY
@@ -77,6 +78,7 @@ fn main() -> std::io::Result<()> {
                     }
                     last_activity = Instant::now();
                     let outcome = validator.receive_pdu(&pdu);
+                    telemetry.record_pdu_outcome(&outcome);
                     match outcome {
                         ImmediatePduResult::BufferedWaitingForTrust => {
                             println!(
@@ -131,6 +133,7 @@ fn main() -> std::io::Result<()> {
                     }
                     last_activity = Instant::now();
                     let outcome = validator.receive_trust(&trust);
+                    telemetry.record_trust_outcome(&outcome);
                     match outcome {
                         ImmediateTrustResult::ColdStartSynchronized => {
                             println!(
@@ -190,6 +193,7 @@ fn main() -> std::io::Result<()> {
         // 3. Avancement temporisé de la fenêtre
         if stream_active && last_advance.elapsed() >= advance_interval {
             let report = validator.advance_one_slot();
+            telemetry.record_eviction(&report);
             match report {
                 EvictionReport::DroppedPdu { seq } => {
                     println!("  [🔥 SUPPRIMÉ] Seq: {:<4} | ALERTE : PDU perdue !", seq);
@@ -212,7 +216,9 @@ fn main() -> std::io::Result<()> {
     }
 
     println!("\n============================================================");
-    println!("  MACHINE B : FIN DE SESSION DE SURVEILLANCE");
+    println!("  MACHINE B : BILAN DE TÉLÉMÉTRIE DÉTERMINISTE");
     println!("============================================================");
+    println!("  {}", telemetry.summary());
+    println!("\n[PROMETHEUS METRICS]\n{}", telemetry.prometheus_export());
     Ok(())
 }

@@ -274,7 +274,7 @@ stateDiagram-v2
 
 ## 6. Preuves Formelles et Théorèmes Clés (Verus SMT)
 
-Le cœur de la bibliothèque comporte **46 spécifications, lemmes et théorèmes** déductifs vérifiés par solveur SMT (Z3) sans aucune erreur.
+Le cœur de la bibliothèque comporte **50 unités de vérification déductives** vérifiées par solveur SMT (Z3) sans aucune erreur, incluant **24 théorèmes et lemmes formels purs (`proof fn`)** :
 
 | Domaine | Identifiant du Théorème / Lemme | Propriété Mathématique Démontrée |
 | :--- | :--- | :--- |
@@ -290,9 +290,13 @@ Le cœur de la bibliothèque comporte **46 spécifications, lemmes et théorème
 | **Crash Consistency**| `theorem_crash_prefix_soundness` | Toute coupure de courant laisse un préfixe intègre de la séquence commise. |
 | **Crash Consistency**| `theorem_batch_commit_prefix_soundness` | Le Group Commit garantit l'invariance de préfixe sain post-crash. |
 | **Crash Consistency**| `theorem_recovery_idempotence` | Idempotence de la récupération : $\mathcal{R}(\mathcal{R}(S)) = \mathcal{R}(S)$. |
+| **Crash Recovery**  | `theorem_recovery_algorithm_soundness` | Fermeture Trou n°2 : le préfixe continu extrait est prouvé valide, intègre et strictement monotone. |
+| **Crash Recovery**  | `theorem_recovery_stops_at_first_corruption` | Fermeture Trou n°2 : la chaîne saine s'arrête obligatoirement à la première corruption physique. |
+| **Crash Recovery**  | `theorem_recovery_stops_at_first_non_monotonic` | Fermeture Trou n°2 : la chaîne saine s'arrête obligatoirement à la première anomalie d'ordre. |
 | **Continuité NVRAM** | `theorem_disk_replacement_monotonicity` | Le changement de disque garantit un démarrage avec une époque strictement supérieure. |
+| **Anti-Usure NVRAM** | `theorem_epoch_range_disk_replacement_monotonicity` | Toute réservation par plage garantit que les plages futures sont strictement supérieures aux époques utilisées. |
 | **Sérialisation** | `lemma_u64_roundtrip`, `lemma_u32_roundtrip` | Bijectivité prouvée par vecteurs de bits sur la conversion Big-Endian. |
-| **Sérialisation** | `theorem_record_serialization_roundtrip` | $\text{decode}(\text{encode}(r)) = \text{Some}(r)$ sur tout enregistrement intègre. |
+| **Sérialisation** | `theorem_record_serialization_roundtrip` | Fermeture Trou n°1 : $\text{decode}(\text{encode}(r)) = \text{Some}(r)$ sur tout enregistrement intègre. |
 | **Sérialisation** | `theorem_decode_rejects_truncated_bytes` | Rejet formel des blocs tronqués par un crash ($L \ne 40$). |
 | **Sérialisation** | `theorem_decode_rejects_invalid_magic` | Rejet formel de tout bloc sans nombre magique "TRUS". |
 | **Sérialisation** | `theorem_decode_rejects_invalid_checksum` | Rejet formel de tout bloc à somme de contrôle divergente. |
@@ -342,8 +346,10 @@ Le cœur de la bibliothèque comporte **46 spécifications, lemmes et théorème
 | **EF-05** | Survie au remplacement de disque | [`HardwareMonotonicCounter`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L1300) | `theorem_disk_replacement_monotonicity`, `test_hard_drive_replacement_survival` |
 | **EF-06** | Auto-acquisition Cold-Start B | [`new_cold_start`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L345) | `theorem_cold_start_acquisition`, `test_cold_start_auto_acquisition` |
 | **EF-07** | Salves de pré-époque (16 slots) | [`pending_next_pdus`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L340) | Invariants de boucle Verus, `test_multi_pdu_burst_next_epoch` |
+| **EF-08** | Anti-usure NVRAM & Survie swap disque | [`reserve_epoch_range`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L1590) | `theorem_epoch_range_disk_replacement_monotonicity`, `test_epoch_range_allocation_and_disk_replacement_immunity` |
 | **ENF-01**| Temps d'exécution $O(1)$ | Buffer circulaire direct 4096 | `lemma_ring_buffer_injectivity` |
 | **ENF-02**| Group Commit haute cadence | [`append_batch`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L1240) | `theorem_batch_commit_prefix_soundness`, `test_journal_group_commit_batch` |
-| **ENF-03**| Zéro panique & Sûreté mémoire | Directives `#![forbid(unsafe_code)]` | Vérification Clippy `-D warnings`, 98.32% couverture |
-| **ENF-04**| Preuve SMT intégrale | Bloc `verus!` | 46 vérifications réussies sous Z3 |
+| **ENF-03**| Zéro panique & Sûreté mémoire | Directives `#![forbid(unsafe_code)]` | Vérification Clippy `-D warnings`, 97.96% couverture |
+| **ENF-04**| Preuve SMT intégrale | Bloc `verus!` | 50 vérifications réussies sous Z3 (24 proof fn) |
+| **ENF-05**| Télémétrie déterministe zero-alloc | [`StreamTelemetry`](file:///Users/jean-baptiste/AI-Trust/src/lib.rs#L1640) | OpenMetrics / Prometheus export, `test_stream_telemetry_metrics_and_prometheus` |
 
